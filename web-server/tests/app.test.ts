@@ -1,28 +1,44 @@
 import request from "supertest";
 import app from "../src/app";
-import { existsSync, mkdirSync, writeFileSync, chmodSync } from "fs";
+import { createServer, Server, Socket } from "net";
+import { unlinkSync, existsSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { mkdtempSync } from "fs";
 
-const MOCK_DIR = mkdtempSync(join(tmpdir(), "deploy-test-mock-"));
-const MOCK_WORKER = join(MOCK_DIR, "mock-worker.sh");
-const MOCK_WORKER_FAIL = join(MOCK_DIR, "mock-worker-fail.sh");
+const MOCK_DIR = mkdtempSync(join(tmpdir(), "deploy-test-sock-"));
+const MOCK_SOCKET = join(MOCK_DIR, "test.sock");
+
+let mockServer: Server;
+
+function startMockWorker(
+  handler: (data: Buffer, client: Socket) => void
+): Promise<void> {
+  return new Promise((resolve) => {
+    if (existsSync(MOCK_SOCKET)) unlinkSync(MOCK_SOCKET);
+    mockServer = createServer((client) => {
+      const chunks: Buffer[] = [];
+      client.on("data", (chunk: Buffer) => chunks.push(chunk));
+      client.on("end", () => handler(Buffer.concat(chunks), client));
+    });
+    mockServer.listen(MOCK_SOCKET, resolve);
+  });
+}
+
+function stopMockWorker(): Promise<void> {
+  return new Promise((resolve) => {
+    if (mockServer) mockServer.close(() => resolve());
+    else resolve();
+  });
+}
 
 beforeAll(() => {
-  writeFileSync(
-    MOCK_WORKER,
-    '#!/bin/bash\necho "hello from mock"\necho "step done"\n'
-  );
-  chmodSync(MOCK_WORKER, "755");
-
-  writeFileSync(
-    MOCK_WORKER_FAIL,
-    '#!/bin/bash\necho "starting"\nexit 42\n'
-  );
-  chmodSync(MOCK_WORKER_FAIL, "755");
-
   process.env.DEPLOY_TOKEN = "test-secret-token";
+  process.env.WORKER_SOCKET = MOCK_SOCKET;
+});
+
+afterEach(async () => {
+  await stopMockWorker();
 });
 
 describe("POST /deploy", () => {
@@ -56,11 +72,7 @@ describe("POST /deploy", () => {
     });
   });
 
-  describe("with valid auth and mock worker", () => {
-    beforeAll(() => {
-      process.env.WORKER_BIN = MOCK_WORKER;
-    });
-
+  describe("request validation", () => {
     it("returns 400 when body is empty", async () => {
       const res = await request(app)
         .post("/deploy")
@@ -70,8 +82,17 @@ describe("POST /deploy", () => {
       expect(res.status).toBe(400);
       expect(res.body.error).toBe("Empty body");
     });
+  });
 
+  describe("with mock worker socket", () => {
     it("streams output from the worker", async () => {
+      await startMockWorker((_data, client) => {
+        client.write("=== Step: Greet ===\n");
+        client.write("hello from mock\n");
+        client.write("step done\n");
+        client.end();
+      });
+
       const res = await request(app)
         .post("/deploy")
         .set("Authorization", "Bearer test-secret-token")
@@ -83,41 +104,32 @@ describe("POST /deploy", () => {
       expect(res.text).toContain("step done");
     });
 
-    it("cleans up the temp directory after completion", async () => {
-      // We need to intercept the tmpDir path. We'll verify by checking
-      // that no deploy-* dirs remain beyond what existed before.
-      const osTmpDir = tmpdir();
-      const beforeDirs = new Set(
-        require("fs")
-          .readdirSync(osTmpDir)
-          .filter((d: string) => d.startsWith("deploy-"))
-      );
+    it("forwards the YAML body to the worker", async () => {
+      const yamlContent = "steps:\n  - name: check\n    run: echo ok\n";
+      let received = "";
+
+      await startMockWorker((data, client) => {
+        received = data.toString();
+        client.write("ok\n");
+        client.end();
+      });
 
       await request(app)
         .post("/deploy")
         .set("Authorization", "Bearer test-secret-token")
         .set("Content-Type", "application/octet-stream")
-        .send(Buffer.from("some yaml content\n"));
+        .send(Buffer.from(yamlContent));
 
-      // Small delay to let async cleanup finish
-      await new Promise((r) => setTimeout(r, 200));
-
-      const afterDirs = require("fs")
-        .readdirSync(osTmpDir)
-        .filter(
-          (d: string) => d.startsWith("deploy-") && !beforeDirs.has(d)
-        );
-
-      expect(afterDirs.length).toBe(0);
-    });
-  });
-
-  describe("worker failure", () => {
-    beforeAll(() => {
-      process.env.WORKER_BIN = MOCK_WORKER_FAIL;
+      expect(received).toBe(yamlContent);
     });
 
-    it("includes exit code marker when worker exits non-zero", async () => {
+    it("includes exit code marker when worker reports failure", async () => {
+      await startMockWorker((_data, client) => {
+        client.write("starting\n");
+        client.write("\n[EXIT CODE: 42]\n");
+        client.end();
+      });
+
       const res = await request(app)
         .post("/deploy")
         .set("Authorization", "Bearer test-secret-token")
@@ -127,6 +139,21 @@ describe("POST /deploy", () => {
       expect(res.status).toBe(200);
       expect(res.text).toContain("starting");
       expect(res.text).toContain("[EXIT CODE: 42]");
+    });
+
+    it("returns 502 when worker socket is unavailable", async () => {
+      process.env.WORKER_SOCKET = "/tmp/nonexistent-deployer-test.sock";
+
+      const res = await request(app)
+        .post("/deploy")
+        .set("Authorization", "Bearer test-secret-token")
+        .set("Content-Type", "application/octet-stream")
+        .send(Buffer.from("steps:\n  - name: test\n    run: echo hi\n"));
+
+      expect(res.status).toBe(502);
+      expect(res.text).toContain("WORKER ERROR");
+
+      process.env.WORKER_SOCKET = MOCK_SOCKET;
     });
   });
 });
