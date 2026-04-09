@@ -10,7 +10,6 @@ app.get("/*", async (req: Request, res: Response) => {
 });
 
 app.post("/deploy", async (req: Request, res: Response) => {
-  console.log("deploy");
   const token = process.env.DEPLOY_TOKEN ?? "changeme";
   const socketPath = process.env.WORKER_SOCKET ?? "/var/run/deployer.sock";
 
@@ -26,7 +25,7 @@ app.post("/deploy", async (req: Request, res: Response) => {
     return;
   }
 
-  const sock = createConnection(socketPath);
+  const sock = createConnection({ path: socketPath, allowHalfOpen: true });
 
   sock.on("connect", () => {
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
@@ -34,7 +33,10 @@ app.post("/deploy", async (req: Request, res: Response) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.flushHeaders();
 
-    sock.end(body);
+    const header = Buffer.alloc(4);
+    header.writeUInt32BE(body.length, 0);
+    sock.write(header);
+    sock.write(body);
   });
 
   sock.on("data", (chunk: Buffer) => {
@@ -42,6 +44,7 @@ app.post("/deploy", async (req: Request, res: Response) => {
   });
 
   sock.on("end", () => {
+    sock.end();
     res.end();
   });
 

@@ -16,10 +16,29 @@ function startMockWorker(
 ): Promise<void> {
   return new Promise((resolve) => {
     if (existsSync(MOCK_SOCKET)) unlinkSync(MOCK_SOCKET);
-    mockServer = createServer((client) => {
-      const chunks: Buffer[] = [];
-      client.on("data", (chunk: Buffer) => chunks.push(chunk));
-      client.on("end", () => handler(Buffer.concat(chunks), client));
+    mockServer = createServer({ allowHalfOpen: true }, (client) => {
+      let headerBuf = Buffer.alloc(0);
+      let bodyBuf = Buffer.alloc(0);
+      let expectedLen: number | null = null;
+
+      client.on("data", (chunk: Buffer) => {
+        const pending = Buffer.concat([headerBuf, bodyBuf, chunk]);
+
+        if (expectedLen === null) {
+          if (pending.length < 4) {
+            headerBuf = pending;
+            return;
+          }
+          expectedLen = pending.readUInt32BE(0);
+          bodyBuf = pending.subarray(4);
+        } else {
+          bodyBuf = Buffer.concat([bodyBuf, chunk]);
+        }
+
+        if (expectedLen !== null && bodyBuf.length >= expectedLen) {
+          handler(bodyBuf.subarray(0, expectedLen), client);
+        }
+      });
     });
     mockServer.listen(MOCK_SOCKET, resolve);
   });

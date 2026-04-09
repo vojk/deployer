@@ -1,6 +1,7 @@
 #include "parser.h"
 #include <cerrno>
 #include <csignal>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
@@ -16,14 +17,29 @@ static void cleanup(int) {
     _exit(0);
 }
 
-static std::string readAll(int fd) {
-    std::string data;
-    char buf[4096];
-    for (;;) {
-        ssize_t n = read(fd, buf, sizeof(buf));
-        if (n > 0) data.append(buf, n);
-        else break;
+static bool readExact(int fd, void* dest, size_t len) {
+    char* p = static_cast<char*>(dest);
+    size_t remaining = len;
+    while (remaining > 0) {
+        ssize_t n = read(fd, p, remaining);
+        if (n <= 0) return false;
+        p += n;
+        remaining -= n;
     }
+    return true;
+}
+
+static std::string readMessage(int fd) {
+    uint8_t header[4];
+    if (!readExact(fd, header, 4)) return "";
+
+    uint32_t len = (uint32_t)header[0] << 24
+                 | (uint32_t)header[1] << 16
+                 | (uint32_t)header[2] << 8
+                 | (uint32_t)header[3];
+
+    std::string data(len, '\0');
+    if (!readExact(fd, &data[0], len)) return "";
     return data;
 }
 
@@ -39,7 +55,7 @@ static void sendStr(int fd, const std::string& s) {
 }
 
 static void handleClient(int clientFd) {
-    std::string yaml = readAll(clientFd);
+    std::string yaml = readMessage(clientFd);
 
     std::vector<Step> steps;
     std::vector<Variable> variables;
