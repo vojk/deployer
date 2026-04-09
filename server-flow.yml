@@ -1,0 +1,5 @@
+steps:
+  - name: "Print hello"
+    run: "echo hello"
+  - name: "List files"
+    run: "ls -la"

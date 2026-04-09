@@ -1,0 +1,14 @@
+services:
+  gateway:
+    build:
+      context: ./web-server
+      dockerfile: Dockerfile
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - PORT=3000
+      - DEPLOY_TOKEN=${DEPLOY_TOKEN:?Set DEPLOY_TOKEN in .env}
+      - WORKER_BIN=/opt/deployer/deployer
+    volumes:
+      - ./includes/build/deployer:/opt/deployer/deployer:ro
+    restart: unless-stopped
