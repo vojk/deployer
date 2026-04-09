@@ -5,7 +5,12 @@ const app = express();
 
 app.use(express.raw({ type: "*/*", limit: "1mb" }));
 
+app.get("/*", async (req: Request, res: Response) => {
+  res.status(200).json({ message: "Healthy" });
+});
+
 app.post("/deploy", async (req: Request, res: Response) => {
+  console.log("deploy");
   const token = process.env.DEPLOY_TOKEN ?? "changeme";
   const socketPath = process.env.WORKER_SOCKET ?? "/var/run/deployer.sock";
 
