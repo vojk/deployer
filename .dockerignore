@@ -1,0 +1,9 @@
+**/.git
+**/node_modules
+**/dist
+**/build
+**/.env
+.github
+server-flow.yml
+web-server/tests
+web-server/jest.config.ts
