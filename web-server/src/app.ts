@@ -33,10 +33,10 @@ app.post("/deploy", async (req: Request, res: Response) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.flushHeaders();
 
-    const header = Buffer.alloc(4);
-    header.writeUInt32BE(body.length, 0);
-    sock.write(header);
-    sock.write(body);
+    const frame = Buffer.alloc(4 + body.length);
+    frame.writeUInt32BE(body.length, 0);
+    body.copy(frame, 4);
+    sock.end(frame);
   });
 
   sock.on("data", (chunk: Buffer) => {

@@ -10,13 +10,5 @@ services:
       - DEPLOY_TOKEN=${DEPLOY_TOKEN:?Set DEPLOY_TOKEN in .env}
       - WORKER_SOCKET=/run/deployer/deployer.sock
     volumes:
-      - deployer-sock:/run/deployer
+      - /run/deployer:/run/deployer
     restart: unless-stopped
-
-volumes:
-  deployer-sock:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: /run/deployer
