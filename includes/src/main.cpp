@@ -4,7 +4,6 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
-#include <sstream>
 #include <string>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -43,8 +42,10 @@ static void handleClient(int clientFd) {
     std::string yaml = readAll(clientFd);
 
     std::vector<Step> steps;
+    std::vector<Variable> variables;
     try {
-        steps = parseSteps(yaml);
+        variables = parseVariables(yaml);
+        steps = parseSteps(yaml, variables);
     } catch (const std::runtime_error& e) {
         std::string msg = std::string("Parse error: ") + e.what() + "\n";
         sendStr(clientFd, msg);

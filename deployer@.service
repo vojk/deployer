@@ -1,0 +1,19 @@
+[Unit]
+Description=Deployer worker (CI/CD step executor)
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+Group=%i
+RuntimeDirectory=deployer
+RuntimeDirectoryMode=0775
+
+ExecStart=/opt/deployer/deployer /run/deployer/deployer.sock
+ExecStopPost=/bin/rm -f /run/deployer/deployer.sock
+
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

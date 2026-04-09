@@ -1,3 +1,7 @@
+vars:
+  - name: "GIT_REPO"
+    value: "https://github.com/user/repo.git"
+
 steps:
   - name: "Print hello"
     run: "echo hello"
