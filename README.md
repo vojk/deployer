@@ -1,24 +1,62 @@
-# Custom CI/CD Runner
+# Self-hosted deploy runner
 
-Self-hosted CI/CD runner that receives a YAML workflow from GitHub Actions, executes the steps on the host machine, and streams logs back in real time.
+This project is a **self-hosted CI/CD runner** for a single machine: your GitHub Actions workflow sends a YAML file that describes shell steps; a small **gateway** validates the request and forwards the payload to a **C++ worker** over a Unix socket; the worker runs each step and **streams logs back** over HTTP so you see output in the Actions UI as it runs.
 
-## Architecture
+Use it when you want deployments or maintenance tasks to execute on **your** server with **your** credentials and paths, without exposing arbitrary shell access—only clients that present a configured API key can trigger a run.
+
+---
+
+## What runs where
 
 ```
-GitHub Action ──POST YAML──▶ Express gateway (Docker) ──Unix socket──▶ C++ worker (host)
-               ◀─chunked HTTP─                         ◀──stream logs──
+GitHub Actions  ──POST YAML (chunked response)──▶  Gateway (Express, Docker)
+                                                      │
+                                                      │ Unix socket
+                                                      ▼
+                                               Worker (C++, systemd on host)
 ```
 
-- **Gateway** -- Node.js/Express server running in a Docker container. Authenticates requests via Bearer token and forwards the YAML to the worker over a Unix socket.
-- **Worker** -- C++ daemon running natively on the host under a specific user. Parses the YAML, executes each step via `popen`, and streams output back through the socket. Commands run with the permissions of the configured system user.
-- **Client** -- A GitHub Actions workflow that sends `server-flow.yml` to the server on every push to `main`.
+| Piece | Role |
+| ----- | ---- |
+| **Gateway** (`web-server/`) | HTTP API: checks the API key against a SQLite database, then sends the raw YAML body to the worker socket and streams the worker output back to the client. |
+| **Worker** (`includes/`) | Daemon: parses YAML, runs each step with `popen`, streams stdout/stderr to the gateway. Runs as the systemd instance user you choose. |
+| **Repository workflow** | On each push (or trigger you define), POSTs `server-flow.yml` to your gateway using a secret token. |
 
-## Prerequisites
+---
 
-- Linux server with systemd
-- Docker and Docker Compose
-- CMake >= 3.14, a C++17 compiler, and git (for building the worker)
-- Node.js >= 18 (only needed if running tests locally)
+## Quick usage (after setup)
+
+Health check (no auth):
+
+```bash
+curl -sS "https://your-host.example/"
+```
+
+Expect JSON: `{"message":"Healthy"}`.
+
+Deploy or run your defined steps (requires a valid token and `server-flow.yml` in the current directory):
+
+```bash
+curl -N -f \
+  -X POST \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @server-flow.yml \
+  "https://your-host.example/deploy"
+```
+
+`-N` disables buffering so streamed log lines appear as they arrive. Replace the URL with your gateway’s public base URL (no trailing slash before `/deploy` in the example above—use your real path).
+
+---
+
+## Requirements
+
+- Linux host with **systemd** for the worker
+- **Docker** and **Docker Compose** for the gateway container
+- **CMake** ≥ 3.14, **C++17** compiler, and **git** (CMake fetches dependencies for the worker build)
+- **Node.js** (matching the gateway toolchain, e.g. 22) if you run gateway tests or Biome locally
+
+---
 
 ## Setup
 
@@ -27,49 +65,37 @@ GitHub Action ──POST YAML──▶ Express gateway (Docker) ──Unix socke
 ```bash
 cd includes
 cmake -S . -B build
-cmake --build build -j$(nproc)
+cmake --build build -j"$(nproc)"
 ```
 
-This produces `includes/build/deployer`.
+Binary: `includes/build/deployer`. Tests: `includes/build/deployer_tests` or `ctest --test-dir build --output-on-failure`.
 
 ### 2. Install the worker on the server
-
-Copy the binary:
 
 ```bash
 sudo mkdir -p /opt/deployer
 sudo cp includes/build/deployer /opt/deployer/deployer
-```
-
-Install the systemd service (template unit -- the instance name is the user the worker runs as):
-
-```bash
 sudo cp deployer@.service /etc/systemd/system/
 sudo systemctl daemon-reload
+sudo systemctl enable --now deployer@MYUSER
 ```
 
-Start the worker as your desired user (replace `myuser` with the actual username):
+Replace `MYUSER` with the account the worker should use. Confirm in logs that the listener path matches what the gateway will use (see `WORKER_SOCKET` below).
 
-```bash
-sudo systemctl enable --now deployer@myuser
-```
+### 3. Configure the gateway environment
 
-Verify it is running:
+Create a `.env` in the **repository root** (optional, used by Docker Compose variable substitution):
 
-```bash
-sudo systemctl status deployer@myuser
-```
+| Variable | Purpose |
+| -------- | ------- |
+| `PORT` | Host port published to the container (default `3000`). |
 
-You should see `Deployer listening on /run/deployer/deployer.sock` in the log output.
+Optional overrides inside the gateway container:
 
-### 3. Configure the gateway
-
-Create a `.env` file in the project root:
-
-```bash
-DEPLOY_TOKEN=your-secret-token-here
-PORT=3000
-```
+| Variable | Purpose |
+| -------- | ------- |
+| `WORKER_SOCKET` | Path to the worker’s Unix socket. Default in Compose is `/run/deployer/deployer.sock`; align with your systemd unit and socket directory mount. |
+| `DEPLOY_DB_PATH` | Path to the SQLite file inside the container. Compose defaults to `/data/deploy.db` and mounts a persistent volume. |
 
 ### 4. Start the gateway
 
@@ -77,29 +103,39 @@ PORT=3000
 docker compose up -d --build
 ```
 
-The Express server will start on port 3000 (or whatever `PORT` is set to) and communicate with the worker via `/run/deployer/deployer.sock`.
+The gateway listens on `PORT` and connects to the worker via the configured socket.
 
-### 5. Configure GitHub repository
+### 5. Initialize deploy keys
 
-Add the following secrets in your GitHub repository settings (Settings > Secrets and variables > Actions):
+After the gateway is running, insert at least one API key into the SQLite DB:
 
+```bash
+docker compose exec gateway npm run add-key -- "YOUR_DEPLOY_TOKEN"
+```
 
-| Secret         | Value                                              |
-| -------------- | -------------------------------------------------- |
-| `DEPLOY_TOKEN` | Same token as in `.env`                            |
-| `DEPLOY_URL`   | Your server URL, e.g. `https://deploy.example.com` |
+This command stores only a SHA-256 hash of the token in `keys`.
 
+### 6. Wire GitHub Actions
 
-Copy the example workflow into your repository:
+In the repo that **deploys this project or your app**, add secrets:
+
+| Secret | Value |
+| ------ | ----- |
+| `DEPLOY_TOKEN` | Same plaintext token you inserted with `npm run add-key -- ...` |
+| `DEPLOY_URL` | Base URL of the gateway, e.g. `https://deploy.example.com` |
+
+Copy the example workflow:
 
 ```bash
 mkdir -p .github/workflows
-cp example/workflows/deploy.yml .github/workflows/deploy.yml
+cp example_workflow/deploy.yml .github/workflows/deploy.yml
 ```
 
-### 6. Define your workflow
+Adjust triggers and branches as needed.
 
-Edit `server-flow.yml` in the repository root:
+### 7. Define steps on the server repo
+
+Edit `server-flow.yml` at the root of the repository that Actions checks out—this file is what gets POSTed.
 
 ```yaml
 steps:
@@ -111,7 +147,7 @@ steps:
     run: "sudo systemctl restart myapp"
 ```
 
-The `vars` section is also supported for reusable values:
+Optional `vars` for substitution:
 
 ```yaml
 vars:
@@ -123,71 +159,78 @@ steps:
     run: "cd {{!APP_DIR!}} && git pull"
 ```
 
-Push to `main` and the workflow will execute on your server with logs streamed back to the GitHub Actions console.
+---
 
-## Running Tests
+## Development and tests
 
-### C++ parser tests (Google Test)
+### C++ (Google Test)
 
 ```bash
 cd includes
 cmake -S . -B build
-cmake --build build -j$(nproc)
-./build/deployer_tests
+cmake --build build -j"$(nproc)"
+ctest --test-dir build --output-on-failure
 ```
 
-### Express gateway tests (Jest + Supertest)
+### Gateway (Jest)
 
 ```bash
 cd web-server
-npm install
+npm ci
 npm test
 ```
 
-The gateway tests use a mock Unix socket server -- no running C++ worker is needed.
+Tests use a mock Unix socket; no live worker required.
 
-## Project Structure
+### Gateway lint and format (Biome)
+
+```bash
+cd web-server
+npm ci
+npm run check          # lint + format check (non-destructive)
+npm run lint           # lint only
+npm run format         # write formatted files
+npm run ci             # CI-friendly check (used in GitHub Actions)
+```
+
+---
+
+## Project layout
 
 ```
 .
-├── server-flow.yml              # Workflow definition (steps to execute)
-├── docker-compose.yml           # Gateway container configuration
-├── deployer@.service            # systemd template unit for the worker
-├── .env                         # DEPLOY_TOKEN, PORT (not in git)
-├── example/
-│   └── workflows/
-│       └── deploy.yml           # GitHub Actions workflow to copy into your repo
-├── web-server/                  # Express gateway
-│   ├── Dockerfile
-│   ├── package.json
-│   ├── tsconfig.json
-│   ├── jest.config.ts
+├── server-flow.yml           # Steps executed when you POST from Actions
+├── docker-compose.yml        # Gateway service
+├── deployer@.service         # systemd template for the worker
+├── example_workflow/
+│   └── deploy.yml            # Example GitHub Actions workflow to copy
+├── web-server/               # Express gateway (TypeScript)
 │   ├── src/
-│   │   ├── app.ts               # Express app (auth, socket forwarding)
-│   │   └── server.ts            # Entry point
+│   │   ├── app.ts
+│   │   ├── addDeployKey.ts    # CLI helper for inserting hashed API keys
+│   │   ├── server.ts
+│   │   └── deployDb.ts        # SQLite bootstrap and hashed key helpers
 │   └── tests/
-│       └── app.test.ts          # 8 tests (auth, streaming, errors)
-└── includes/                    # C++ worker
+│       └── app.test.ts
+└── includes/                 # C++ worker + parser tests
     ├── CMakeLists.txt
     ├── src/
-    │   ├── main.cpp             # Unix socket server daemon
-    │   ├── parser.h             # YAML parsing (testable interface)
-    │   └── parser.cpp
     └── tests/
-        └── parser_test.cpp      # 7 tests (parsing logic)
 ```
 
-## Managing the Worker
+---
+
+## Operating the worker
 
 ```bash
-# Check status
-sudo systemctl status deployer@myuser
-
-# View logs
-sudo journalctl -u deployer@myuser -f
-
-# Restart after rebuilding
+sudo systemctl status deployer@MYUSER
+sudo journalctl -u deployer@MYUSER -f
 sudo cp includes/build/deployer /opt/deployer/deployer
-sudo systemctl restart deployer@myuser
+sudo systemctl restart deployer@MYUSER
 ```
 
+---
+
+## Continuous integration
+
+This repository includes a GitHub Actions workflow that builds and tests the C++ project and runs gateway tests plus Biome on the `web-server` package. See `.github/workflows/ci.yml`.

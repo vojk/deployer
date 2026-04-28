@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  cpp:
+    name: C++ build and tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential
+
+      - name: Configure and build
+        working-directory: includes
+        run: |
+          cmake -S . -B build
+          cmake --build build -j"$(nproc)"
+
+      - name: Run tests
+        working-directory: includes
+        run: ctest --test-dir build --output-on-failure
+
+  web-server:
+    name: Gateway tests and Biome
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web-server/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web-server
+        run: npm ci
+
+      - name: Run Jest tests
+        working-directory: web-server
+        run: npm test
+
+      - name: Biome CI
+        working-directory: web-server
+        run: npm run ci

@@ -1,6 +1,4 @@
 #include "parser.h"
-
-#include <iostream>
 #include <yaml-cpp/yaml.h>
 #include <stdexcept>
 
