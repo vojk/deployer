@@ -68,7 +68,9 @@ jobs:
             "docker-compose.yml"
             "LICENSE"
             "README.md"
+            "RELEASE_README.md"
             "server-flow.yml"
+            "includes/build/deployer"
           )
 
           for path in "${required_paths[@]}"; do
@@ -94,7 +96,9 @@ jobs:
           cp -a docker-compose.yml "release_bundle/${RELEASE_DIR}/"
           cp -a LICENSE "release_bundle/${RELEASE_DIR}/"
           cp -a README.md "release_bundle/${RELEASE_DIR}/"
+          cp -a RELEASE_README.md "release_bundle/${RELEASE_DIR}/"
           cp -a server-flow.yml "release_bundle/${RELEASE_DIR}/"
+          install -m 0755 includes/build/deployer "release_bundle/${RELEASE_DIR}/deployer"
 
           tar -czf "${TAR_NAME}" -C release_bundle "${RELEASE_DIR}"
           (
