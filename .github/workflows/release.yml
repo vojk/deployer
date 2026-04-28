@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release bundle
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build C++ worker
+        working-directory: includes
+        run: |
+          cmake -S . -B build
+          cmake --build build -j"$(nproc)"
+
+      - name: Generate release metadata
+        id: metadata
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          slug="$(echo "${PR_TITLE}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-+/-/g')"
+          if [ -z "${slug}" ]; then
+            slug="release"
+          fi
+          timestamp="$(date -u +"%Y%m%d-%H%M%S")"
+          tag="${slug}-${timestamp}"
+          release_dir="deploy-release-${tag}"
+          tar_name="${release_dir}.tar.gz"
+          zip_name="${release_dir}.zip"
+
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "release_dir=${release_dir}" >> "${GITHUB_OUTPUT}"
+          echo "tar_name=${tar_name}" >> "${GITHUB_OUTPUT}"
+          echo "zip_name=${zip_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create release notes
+        id: notes
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if [ -z "${PR_BODY}" ]; then
+            cat <<'EOF' > release-notes.md
+          Release generated from merged pull request.
+          EOF
+          else
+            printf '%s\n' "${PR_BODY}" > release-notes.md
+          fi
+          echo "body_path=release-notes.md" >> "${GITHUB_OUTPUT}"
+
+      - name: Validate release input paths
+        run: |
+          required_paths=(
+            "web-server"
+            "example_workflow"
+            ".dockerignore"
+            "deployer@.service"
+            "docker-compose.yml"
+            "LICENSE"
+            "README.md"
+            "server-flow.yml"
+          )
+
+          for path in "${required_paths[@]}"; do
+            if [ ! -e "${path}" ]; then
+              echo "Missing required path: ${path}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Build release archives
+        id: bundle
+        env:
+          RELEASE_DIR: ${{ steps.metadata.outputs.release_dir }}
+          TAR_NAME: ${{ steps.metadata.outputs.tar_name }}
+          ZIP_NAME: ${{ steps.metadata.outputs.zip_name }}
+        run: |
+          mkdir -p "release_bundle/${RELEASE_DIR}"
+
+          cp -a web-server "release_bundle/${RELEASE_DIR}/"
+          cp -a example_workflow "release_bundle/${RELEASE_DIR}/"
+          cp -a .dockerignore "release_bundle/${RELEASE_DIR}/"
+          cp -a deployer@.service "release_bundle/${RELEASE_DIR}/"
+          cp -a docker-compose.yml "release_bundle/${RELEASE_DIR}/"
+          cp -a LICENSE "release_bundle/${RELEASE_DIR}/"
+          cp -a README.md "release_bundle/${RELEASE_DIR}/"
+          cp -a server-flow.yml "release_bundle/${RELEASE_DIR}/"
+
+          tar -czf "${TAR_NAME}" -C release_bundle "${RELEASE_DIR}"
+          (
+            cd release_bundle
+            zip -r "../${ZIP_NAME}" "${RELEASE_DIR}"
+          )
+
+          echo "tar_path=${TAR_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "zip_path=${ZIP_NAME}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.metadata.outputs.tag }}
+          name: ${{ github.event.pull_request.title }}
+          body_path: ${{ steps.notes.outputs.body_path }}
+          files: |
+            ${{ steps.bundle.outputs.tar_path }}
+            ${{ steps.bundle.outputs.zip_path }}
