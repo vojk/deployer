@@ -84,11 +84,10 @@ Replace `MYUSER` with the account the worker should use. Confirm in logs that th
 
 ### 3. Configure the gateway environment
 
-Create a `.env` in the **repository root** (used by Docker Compose):
+Create a `.env` in the **repository root** (optional, used by Docker Compose variable substitution):
 
 | Variable | Purpose |
 | -------- | ------- |
-| `DEPLOY_TOKEN` | Shared secret. On gateway **startup**, this value is stored in the SQLite `keys` table so `POST /deploy` can authorize `Authorization: Bearer …` requests. |
 | `PORT` | Host port published to the container (default `3000`). |
 
 Optional overrides inside the gateway container:
@@ -96,7 +95,7 @@ Optional overrides inside the gateway container:
 | Variable | Purpose |
 | -------- | ------- |
 | `WORKER_SOCKET` | Path to the worker’s Unix socket. Default in Compose is `/run/deployer/deployer.sock`; align with your systemd unit and socket directory mount. |
-| `DEPLOY_DB_PATH` | Path to the SQLite file inside the container (default `deploy.db` in the working directory). Change if you mount a persistent volume for keys. |
+| `DEPLOY_DB_PATH` | Path to the SQLite file inside the container. Compose defaults to `/data/deploy.db` and mounts a persistent volume. |
 
 ### 4. Start the gateway
 
@@ -106,13 +105,23 @@ docker compose up -d --build
 
 The gateway listens on `PORT` and connects to the worker via the configured socket.
 
-### 5. Wire GitHub Actions
+### 5. Initialize deploy keys
+
+After the gateway is running, insert at least one API key into the SQLite DB:
+
+```bash
+docker compose exec gateway npm run add-key -- "YOUR_DEPLOY_TOKEN"
+```
+
+This command stores only a SHA-256 hash of the token in `keys`.
+
+### 6. Wire GitHub Actions
 
 In the repo that **deploys this project or your app**, add secrets:
 
 | Secret | Value |
 | ------ | ----- |
-| `DEPLOY_TOKEN` | Same string as `DEPLOY_TOKEN` in `.env` |
+| `DEPLOY_TOKEN` | Same plaintext token you inserted with `npm run add-key -- ...` |
 | `DEPLOY_URL` | Base URL of the gateway, e.g. `https://deploy.example.com` |
 
 Copy the example workflow:
@@ -124,7 +133,7 @@ cp example_workflow/deploy.yml .github/workflows/deploy.yml
 
 Adjust triggers and branches as needed.
 
-### 6. Define steps on the server repo
+### 7. Define steps on the server repo
 
 Edit `server-flow.yml` at the root of the repository that Actions checks out—this file is what gets POSTed.
 
@@ -198,8 +207,9 @@ npm run ci             # CI-friendly check (used in GitHub Actions)
 ├── web-server/               # Express gateway (TypeScript)
 │   ├── src/
 │   │   ├── app.ts
+│   │   ├── addDeployKey.ts    # CLI helper for inserting hashed API keys
 │   │   ├── server.ts
-│   │   └── deployDb.ts       # SQLite bootstrap and DEPLOY_TOKEN seeding
+│   │   └── deployDb.ts        # SQLite bootstrap and hashed key helpers
 │   └── tests/
 │       └── app.test.ts
 └── includes/                 # C++ worker + parser tests

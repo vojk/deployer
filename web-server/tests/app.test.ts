@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import request from "supertest";
 import app from "../src/app";
-import { bootstrapDeployDatabase } from "../src/deployDb";
+import { bootstrapDeployDatabase, insertDeployKey } from "../src/deployDb";
 
 const MOCK_DIR = mkdtempSync(join(tmpdir(), "deploy-test-sock-"));
 const MOCK_SOCKET = join(MOCK_DIR, "test.sock");
@@ -54,9 +54,9 @@ function stopMockWorker(): Promise<void> {
 
 beforeAll(async () => {
 	process.env.DEPLOY_DB_PATH = TEST_DB_PATH;
-	process.env.DEPLOY_TOKEN = "test-secret-token";
 	process.env.WORKER_SOCKET = MOCK_SOCKET;
 	await bootstrapDeployDatabase();
+	await insertDeployKey("test-secret-token");
 });
 
 afterEach(async () => {
@@ -104,6 +104,26 @@ describe("POST /deploy", () => {
 			const res = await request(app)
 				.post("/deploy")
 				.set("Authorization", "Basic not-the-deploy-token")
+				.send("steps:\n  - name: test\n    run: echo hi");
+
+			expect(res.status).toBe(401);
+			expect(res.body.error).toBe("Unauthorized");
+		});
+
+		it("returns 401 when Bearer token is missing", async () => {
+			const res = await request(app)
+				.post("/deploy")
+				.set("Authorization", "Bearer")
+				.send("steps:\n  - name: test\n    run: echo hi");
+
+			expect(res.status).toBe(401);
+			expect(res.body.error).toBe("Unauthorized");
+		});
+
+		it("returns 401 when Bearer format is malformed", async () => {
+			const res = await request(app)
+				.post("/deploy")
+				.set("Authorization", "Bearer test-secret-token trailing")
 				.send("steps:\n  - name: test\n    run: echo hi");
 
 			expect(res.status).toBe(401);

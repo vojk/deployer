@@ -2,7 +2,7 @@ import { createConnection } from "node:net";
 import express, { type Request, type Response } from "express";
 import { open } from "sqlite";
 import sqlite3 from "sqlite3";
-import { deployDbPath } from "./deployDb";
+import { deployDbPath, hashDeployToken } from "./deployDb";
 
 const app = express();
 
@@ -21,24 +21,29 @@ app.post("/deploy", async (req: Request, res: Response) => {
 		return;
 	}
 
-	const key = authHeader.split(" ")[1];
-	if (!key) {
+	const parsedAuth = authHeader.match(/^Bearer\s+(\S+)$/);
+	if (!parsedAuth) {
 		res.status(401).json({ error: "Unauthorized" });
 		return;
 	}
+	const token = parsedAuth[1];
 
 	const db = await open({
 		filename: deployDbPath(),
 		driver: sqlite3.Database,
 	});
 
-	const row = await db.get("SELECT * FROM keys WHERE key = ?", [key]);
-	if (!row) {
-		res.status(401).json({ error: "Unauthorized" });
-		return;
+	try {
+		const row = await db.get("SELECT id FROM keys WHERE token_hash = ?", [
+			hashDeployToken(token),
+		]);
+		if (!row) {
+			res.status(401).json({ error: "Unauthorized" });
+			return;
+		}
+	} finally {
+		await db.close();
 	}
-
-	await db.close();
 
 	const body = req.body as Buffer;
 	if (!body || body.length === 0) {

@@ -7,8 +7,12 @@ services:
       - "${PORT:-3000}:3000"
     environment:
       - PORT=3000
-      - DEPLOY_TOKEN=${DEPLOY_TOKEN:?Set DEPLOY_TOKEN in .env}
+      - DEPLOY_DB_PATH=/data/deploy.db
       - WORKER_SOCKET=/run/deployer/deployer.sock
     volumes:
       - /run/deployer:/run/deployer
+      - gateway_data:/data
     restart: unless-stopped
+
+volumes:
+  gateway_data:
