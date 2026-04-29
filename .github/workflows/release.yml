@@ -1,9 +1,15 @@
 name: Release
 
 on:
-  pull_request:
-    types: [closed]
-    branches: [main]
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (must start with v, for example v1.4.0)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -11,12 +17,13 @@ permissions:
 jobs:
   release:
     name: Build and publish release bundle
-    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Build C++ worker
         working-directory: includes
@@ -26,20 +33,28 @@ jobs:
 
       - name: Generate release metadata
         id: metadata
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          slug="$(echo "${PR_TITLE}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-+/-/g')"
-          if [ -z "${slug}" ]; then
-            slug="release"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME}"
           fi
-          timestamp="$(date -u +"%Y%m%d-%H%M%S")"
-          tag="${slug}-${timestamp}"
-          release_dir="deploy-release-${tag}"
+
+          if ! echo "${version}" | grep -Eq '^v[0-9]+(\.[0-9]+){2}([.-][0-9A-Za-z.-]+)?$'; then
+            echo "Invalid version '${version}'. Expected vX.Y.Z (optional suffix allowed)." >&2
+            exit 1
+          fi
+
+          safe_version="$(echo "${version}" | sed -E 's/[^a-zA-Z0-9._-]+/-/g')"
+          tag="${version}"
+          release_name="Release ${version}"
+          release_dir="deploy-release-${safe_version}"
           tar_name="${release_dir}.tar.gz"
           zip_name="${release_dir}.zip"
 
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "release_name=${release_name}" >> "${GITHUB_OUTPUT}"
           echo "release_dir=${release_dir}" >> "${GITHUB_OUTPUT}"
           echo "tar_name=${tar_name}" >> "${GITHUB_OUTPUT}"
           echo "zip_name=${zip_name}" >> "${GITHUB_OUTPUT}"
@@ -47,15 +62,48 @@ jobs:
       - name: Create release notes
         id: notes
         env:
-          PR_BODY: ${{ github.event.pull_request.body }}
+          VERSION: ${{ steps.metadata.outputs.version }}
+          TAR_NAME: ${{ steps.metadata.outputs.tar_name }}
+          ZIP_NAME: ${{ steps.metadata.outputs.zip_name }}
         run: |
-          if [ -z "${PR_BODY}" ]; then
-            cat <<'EOF' > release-notes.md
-          Release generated from merged pull request.
-          EOF
+          previous_tag="$(git tag --sort=-creatordate | grep -E '^v' | grep -Fxv "${VERSION}" | head -n 1 || true)"
+          if [ -n "${previous_tag}" ]; then
+            range="${previous_tag}..HEAD"
           else
-            printf '%s\n' "${PR_BODY}" > release-notes.md
+            range="HEAD"
           fi
+
+          all_commits="$(git log --pretty='- %s (%h)' ${range} || true)"
+          if [ -z "${all_commits}" ]; then
+            all_commits="- No notable changes found in commit history."
+          fi
+
+          breaking_commits="$(git log --pretty='- %s (%h)' ${range} | grep -Ei '(^- .*!:)|breaking(\s|-)?change|incompatible' || true)"
+          if [ -z "${breaking_commits}" ]; then
+            breaking_commits="- No breaking changes detected."
+          fi
+
+          upgrade_commits="$(git log --pretty='- %s (%h)' ${range} | grep -Ei 'upgrade|migration|migrate|deprecat|rollout' || true)"
+          if [ -z "${upgrade_commits}" ]; then
+            upgrade_commits="- No upgrade-specific steps detected."
+          fi
+
+          cat <<EOF > release-notes.md
+          # Release ${VERSION}
+
+          ## Highlights
+          ${all_commits}
+
+          ## Breaking changes
+          ${breaking_commits}
+
+          ## Upgrade notes
+          ${upgrade_commits}
+
+          ## Checksums
+          - Verify artifacts with \`sha256sum -c SHA256SUMS.txt\`.
+          - Included artifacts: \`${TAR_NAME}\`, \`${ZIP_NAME}\`.
+          EOF
           echo "body_path=release-notes.md" >> "${GITHUB_OUTPUT}"
 
       - name: Validate release input paths
@@ -105,16 +153,20 @@ jobs:
             cd release_bundle
             zip -r "../${ZIP_NAME}" "${RELEASE_DIR}"
           )
+          sha256sum "${TAR_NAME}" "${ZIP_NAME}" > SHA256SUMS.txt
 
           echo "tar_path=${TAR_NAME}" >> "${GITHUB_OUTPUT}"
           echo "zip_path=${ZIP_NAME}" >> "${GITHUB_OUTPUT}"
+          echo "checksums_path=SHA256SUMS.txt" >> "${GITHUB_OUTPUT}"
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.metadata.outputs.tag }}
-          name: ${{ github.event.pull_request.title }}
+          name: ${{ steps.metadata.outputs.release_name }}
           body_path: ${{ steps.notes.outputs.body_path }}
+          generate_release_notes: true
           files: |
             ${{ steps.bundle.outputs.tar_path }}
             ${{ steps.bundle.outputs.zip_path }}
+            ${{ steps.bundle.outputs.checksums_path }}
